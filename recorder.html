@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Scorpion Game — Audio Recorder</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a1a;
+    color: #eee;
+    font-family: monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+    min-height: 100vh;
+  }
+  h1 { font-size: 22px; margin-bottom: 6px; color: #ffdd00; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 36px; text-align: center; line-height: 1.6; }
+
+  .clips { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 520px; }
+
+  .clip {
+    background: #252525;
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .clip-info { flex: 1; }
+  .clip-title { font-size: 14px; font-weight: bold; color: #aaddff; }
+  .clip-hint  { font-size: 11px; color: #666; margin-top: 3px; }
+  .clip-status { font-size: 11px; margin-top: 6px; min-height: 14px; color: #888; }
+  .clip-status.ok  { color: #66cc66; }
+  .clip-status.rec { color: #ff7777; }
+
+  .clip-buttons { display: flex; flex-direction: column; gap: 7px; }
+
+  button {
+    font-family: monospace;
+    font-size: 13px;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    min-width: 90px;
+    text-align: center;
+  }
+  button:disabled { opacity: 0.25; cursor: default; }
+
+  .btn-record  { background: #993333; color: #fff; }
+  .btn-record.active { background: #ff4444; animation: pulse 0.9s infinite; }
+  .btn-stop    { background: #555; color: #fff; }
+  .btn-play    { background: #336633; color: #fff; }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.55} }
+
+  .output-section {
+    width: 100%; max-width: 520px; margin-top: 32px;
+  }
+  .output-section h2 { font-size: 15px; color: #ffdd00; margin-bottom: 8px; }
+  .output-section p  { font-size: 12px; color: #777; margin-bottom: 12px; line-height: 1.6; }
+
+  #outputBox {
+    width: 100%; height: 160px;
+    background: #111; color: #88ff88;
+    font-family: monospace; font-size: 11px;
+    padding: 12px; border: 1px solid #444; border-radius: 6px;
+    resize: vertical;
+  }
+  #copyBtn {
+    margin-top: 10px; background: #334455; color: #fff;
+    padding: 9px 22px; font-size: 14px; border-radius: 5px;
+    cursor: pointer; border: none; font-family: monospace;
+  }
+  #copyBtn:hover { background: #445566; }
+  #copyFeedback { font-size: 12px; color: #66cc66; margin-top: 6px; min-height: 18px; }
+</style>
+</head>
+<body>
+
+<h1>Scorpion Game — Audio Recorder</h1>
+<p class="subtitle">
+  Record each clip, then copy the output block into <code>index.html</code>.<br>
+  Hit <strong>Record</strong>, say your line, hit <strong>Stop</strong>. Play it back to check.
+</p>
+
+<div class="clips" id="clipsContainer"></div>
+
+<div class="output-section">
+  <h2>Output</h2>
+  <p>Once all 4 clips are recorded the code block appears below. Copy it and paste it into <code>index.html</code> where you see <code>// PASTE_AUDIO_HERE</code>.</p>
+  <textarea id="outputBox" readonly placeholder="Record all 4 clips to generate output…"></textarea>
+  <br>
+  <button id="copyBtn" onclick="copyOutput()">Copy to clipboard</button>
+  <div id="copyFeedback"></div>
+</div>
+
+<script>
+const CLIPS = [
+  { id: 'apple', label: 'Apple pickup',   hint: 'e.g. "Yum!" or a happy munch' },
+  { id: 'hit0',  label: 'Hit reaction 1', hint: 'e.g. "Ow!" or a yelp' },
+  { id: 'hit1',  label: 'Hit reaction 2', hint: 'e.g. "Ouch!" or a gasp' },
+  { id: 'hit2',  label: 'Hit reaction 3', hint: 'e.g. "Hey!" or a screech' },
+];
+
+const recorded = {};
+let activeId = null;
+let activeRecorder = null;
+let activeStream = null;
+let activeChunks = [];
+
+// ── Build UI ───────────────────────────────────────────────────────────────
+function buildUI() {
+  const container = document.getElementById('clipsContainer');
+  for (const clip of CLIPS) {
+    const div = document.createElement('div');
+    div.className = 'clip';
+    div.innerHTML = `
+      <div class="clip-info">
+        <div class="clip-title">${clip.label}</div>
+        <div class="clip-hint">${clip.hint}</div>
+        <div class="clip-status" id="status-${clip.id}">Not recorded</div>
+      </div>
+      <div class="clip-buttons">
+        <button class="btn-record" id="rec-${clip.id}"  onclick="startRecording('${clip.id}')">● Record</button>
+        <button class="btn-stop"   id="stop-${clip.id}" onclick="stopRecording()" disabled>■ Stop</button>
+        <button class="btn-play"   id="play-${clip.id}" onclick="playClip('${clip.id}')" disabled>▶ Play</button>
+      </div>
+    `;
+    container.appendChild(div);
+  }
+}
+
+// ── Recording ──────────────────────────────────────────────────────────────
+async function startRecording(id) {
+  if (activeRecorder) return;
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    setStatus(id, 'Microphone access denied.', '');
+    return;
+  }
+
+  activeId      = id;
+  activeStream  = stream;
+  activeChunks  = [];
+
+  const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg']
+    .find(t => MediaRecorder.isTypeSupported(t)) || '';
+
+  activeRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+  activeRecorder.ondataavailable = e => { if (e.data.size > 0) activeChunks.push(e.data); };
+  activeRecorder.onstop = finishRecording;
+  activeRecorder.start();
+
+  setStatus(id, '● Recording… hit Stop when done', 'rec');
+
+  // Disable all record buttons except the active one; enable stop
+  CLIPS.forEach(c => {
+    document.getElementById(`rec-${c.id}`).disabled = (c.id !== id);
+    document.getElementById(`stop-${c.id}`).disabled = (c.id !== id);
+  });
+  document.getElementById(`rec-${id}`).classList.add('active');
+}
+
+function stopRecording() {
+  if (!activeRecorder || activeRecorder.state === 'inactive') return;
+  activeRecorder.stop();
+  activeStream.getTracks().forEach(t => t.stop());
+}
+
+function finishRecording() {
+  const id   = activeId;
+  const mime = activeRecorder.mimeType;
+  const blob = new Blob(activeChunks, { type: mime });
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    recorded[id] = reader.result;
+    setStatus(id, '✓ Recorded — play to check, or re-record', 'ok');
+
+    // Reset all buttons
+    CLIPS.forEach(c => {
+      document.getElementById(`rec-${c.id}`).disabled = false;
+      document.getElementById(`rec-${c.id}`).classList.remove('active');
+      document.getElementById(`stop-${c.id}`).disabled = true;
+    });
+    document.getElementById(`play-${id}`).disabled = false;
+
+    activeRecorder = null;
+    activeStream   = null;
+    activeId       = null;
+    activeChunks   = [];
+    updateOutput();
+  };
+  reader.readAsDataURL(blob);
+}
+
+// ── Playback ───────────────────────────────────────────────────────────────
+function playClip(id) {
+  if (!recorded[id]) return;
+  new Audio(recorded[id]).play();
+}
+
+// ── Status helpers ─────────────────────────────────────────────────────────
+function setStatus(id, msg, cls) {
+  const el = document.getElementById(`status-${id}`);
+  el.textContent = msg;
+  el.className = 'clip-status ' + (cls || '');
+}
+
+// ── Output ─────────────────────────────────────────────────────────────────
+function updateOutput() {
+  const box    = document.getElementById('outputBox');
+  const missing = CLIPS.filter(c => !recorded[c.id]).map(c => c.label);
+  if (missing.length) {
+    box.value = `// Still needed: ${missing.join(', ')}`;
+    return;
+  }
+  box.value =
+`// ── Recorded audio clips ────────────────────────────────────────────────
+const AUDIO_APPLE = "${recorded['apple']}";
+const AUDIO_HITS  = [
+  "${recorded['hit0']}",
+  "${recorded['hit1']}",
+  "${recorded['hit2']}"
+];`;
+}
+
+function copyOutput() {
+  const box = document.getElementById('outputBox');
+  if (!box.value || box.value.startsWith('//')) return;
+  navigator.clipboard.writeText(box.value).then(() => {
+    document.getElementById('copyFeedback').textContent = 'Copied!';
+    setTimeout(() => { document.getElementById('copyFeedback').textContent = ''; }, 2000);
+  });
+}
+
+buildUI();
+</script>
+</body>
+</html>
